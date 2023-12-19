@@ -1,0 +1,354 @@
+# Robustness checks
+
+library(tidyverse)
+library(here)
+library(sandwich)
+library(lmtest)
+require(broom)
+
+
+# load data
+load(file=paste0(here(),"/data/VoterSupportData.RData"))
+load(file=paste0(here(),"/data/ClimatePolicies.RData"))
+load(file=paste0(here(),"/data/Elections.RData"))
+
+
+# Analysis ----
+
+## full period time series model without interventions for later residualization
+### data
+data1 <- VoterSupportData %>%
+  filter(StartCollection >= elections$date[2] &
+           EndCollection <= elections$date[3]) %>%
+  dplyr::select(
+    Published,
+    GovernmentSupport,
+    Unemployment,
+    ConsumerPriceIndex,
+    HouseholdConsumption,
+    MiljöpartietMP,
+    ConsumerConfidence,
+    GovtSearch,
+    Date_numeric,
+    PolicyIndicator,
+    PollingInstitute,
+    StartCollection,
+    EndCollection
+  ) %>% mutate(StartCollection = StartCollection %>% as.Date(),
+               EndCollection = EndCollection %>% as.Date())
+
+### model
+lm1_didit <- lm(
+  GovernmentSupport ~ #above*Date_numeric +
+    lag(GovernmentSupport, 1) +
+    lag(GovernmentSupport, 2) +
+    lag(GovernmentSupport, 3) +
+    lag(GovernmentSupport, 4) +
+    lag(GovernmentSupport, 5) +
+    lag(GovernmentSupport, 6) +
+    Unemployment +
+    ConsumerPriceIndex  +
+    HouseholdConsumption +
+    # MiljöpartietMP +
+    ConsumerConfidence +
+    as.factor(PollingInstitute)
+  ,
+  data = data1 %>% as.data.frame(),
+  na.action = na.exclude
+)
+summary(lm1_didit)
+step.model1.didit <-
+  MASS::stepAIC(lm1_didit, direction = "forward",
+                trace = FALSE)
+summary(step.model1.didit)
+coeftest(step.model1.didit, vcov = vcovPL(step.model1.didit))
+preds1 <-
+  bind_cols(
+    data1,
+    predict(step.model1.didit, interval = 'confidence') %>% as.data.frame(),
+    residuals = resid(step.model1.didit, na.action = na.exclude)
+  )
+
+
+# looping over single interventions and bandwidths ----
+
+bandwidth_lst <- list()
+bandwidth_plot_lst <- list()
+
+plot_lst <- list()
+lin_regs_lst <- list()
+poly_regs_lst <- list()
+
+plot_lst_resids <- list()
+lin_regs_lst_resids <- list()
+poly_regs_lst_resids <- list()
+
+coef_lst <- list()
+coef_plot_lst <- list()
+
+for (j in c(60,90,120)) {
+  
+  bw <- which(j == c(60,90,120)) # bandwidth around treatment
+
+  for (i in (envpols[1:3, ] %>% rownames() %>% as.numeric() %>% min):(envpols[1:3, ] %>% rownames() %>% as.numeric() %>% max)) {
+    
+    #real obs simple model
+    df <-
+      data1 %>% filter(
+        StartCollection >= lubridate::ymd(envpols$date[i]) - j &
+          EndCollection <= lubridate::ymd(envpols$date[i]) +
+          j
+      ) %>%
+      mutate(timetotreat = (EndCollection - as.Date(envpols$date[i])) %>% as.numeric)
+    lm_reg <- lm(
+      GovernmentSupport ~ PolicyIndicator * timetotreat,
+      data = df,
+      na.action = na.exclude
+    )
+    lin_regs_lst[[i]] <- lm_reg
+    
+    poly_reg <-
+      lm(
+        GovernmentSupport ~ PolicyIndicator * poly(timetotreat, 2, raw = T),
+        data = df,
+        na.action = na.exclude
+      )
+    poly_regs_lst[[i]] <- poly_reg
+    
+    df <-
+      bind_cols(
+        df,
+        predict(lm_reg, interval = 'confidence') %>% as.data.frame() %>% rename(
+          fit_lin = fit,
+          lwr_lin = lwr,
+          upr_lin = upr
+        ),
+        predict(poly_reg, interval = 'confidence') %>% as.data.frame() %>% rename(
+          fit_poly = fit,
+          lwr_poly = lwr,
+          upr_pol = upr
+        )
+      )
+
+    #residuals
+    df_resids <-
+      preds1 %>% filter(
+        StartCollection >= lubridate::ymd(envpols$date[i]) - j &
+          EndCollection <= lubridate::ymd(envpols$date[i]) + j
+      ) %>%
+      mutate(timetotreat = (EndCollection - as.Date(envpols$date[i])) %>% as.numeric)
+    
+    lm_reg_resids <- lm(residuals ~ PolicyIndicator * timetotreat,
+                        data = df_resids,
+                        na.action = na.exclude)
+    lin_regs_lst_resids[[i]] <- lm_reg_resids
+    
+    poly_reg_resids <-
+      lm(
+        residuals ~ PolicyIndicator * poly(timetotreat, 2, raw = T),
+        data = df_resids,
+        na.action = na.exclude
+      )
+    poly_regs_lst_resids[[i]] <- poly_reg_resids
+    
+    df_resids <- bind_cols(
+      df_resids,
+      predict(lm_reg_resids, interval = 'confidence') %>% as.data.frame() %>% rename(
+        fit_lin = fit,
+        lwr_lin = lwr,
+        upr_lin = upr
+      ),
+      predict(poly_reg_resids, interval = 'confidence') %>% as.data.frame() %>% rename(
+        fit_poly = fit,
+        lwr_poly = lwr,
+        upr_pol = upr
+      )
+    )
+
+    # coefficients
+    coef_lst[[i]] <-
+      bind_rows(
+        bind_cols(
+          level_change = tidy(coeftest(lin_regs_lst[[i]], vcov = vcovPL), conf.int = TRUE)$estimate[2],
+          lc_se = tidy(coeftest(lin_regs_lst[[i]], vcov = vcovPL), conf.int = TRUE)$`std.error`[2],
+          lc_conf_low = tidy(coeftest(lin_regs_lst[[i]], vcov = vcovPL), conf.int = TRUE)$conf.low[2],
+          lc_conf_high = tidy(coeftest(lin_regs_lst[[i]], vcov = vcovPL), conf.int = TRUE)$conf.high[2],
+          
+          slope_change = tidy(coeftest(lin_regs_lst[[i]], vcov = vcovPL), conf.int = TRUE)$estimate[4],
+          sc_se = tidy(coeftest(lin_regs_lst[[i]], vcov = vcovPL), conf.int = TRUE)$`std.error`[4],
+          sc_conf_low = tidy(coeftest(lin_regs_lst[[i]], vcov = vcovPL), conf.int = TRUE)$conf.low[4],
+          sc_conf_high = tidy(coeftest(lin_regs_lst[[i]], vcov = vcovPL), conf.int = TRUE)$conf.high[4],
+          
+          linear = T,
+          polynomial = F,
+          residualized = F
+        ),
+        bind_cols(
+          level_change = tidy(coeftest(poly_regs_lst[[i]], vcov = vcovPL), conf.int = TRUE)$estimate[2],
+          lc_se = tidy(coeftest(poly_regs_lst[[i]], vcov = vcovPL), conf.int = TRUE)$`std.error`[2],
+          lc_conf_low = tidy(coeftest(poly_regs_lst[[i]], vcov = vcovPL), conf.int = TRUE)$conf.low[2],
+          lc_conf_high = tidy(coeftest(poly_regs_lst[[i]], vcov = vcovPL), conf.int = TRUE)$conf.high[2],
+          
+          slope_change = tidy(coeftest(poly_regs_lst[[i]], vcov = vcovPL), conf.int = TRUE)$estimate[5],
+          sc_se = tidy(coeftest(poly_regs_lst[[i]], vcov = vcovPL), conf.int = TRUE)$`std.error`[5],
+          sc_conf_low = tidy(coeftest(poly_regs_lst[[i]], vcov = vcovPL), conf.int = TRUE)$conf.low[5],
+          sc_conf_high = tidy(coeftest(poly_regs_lst[[i]], vcov = vcovPL), conf.int = TRUE)$conf.high[5],
+          
+          linear = F,
+          polynomial = T,
+          residualized = F
+        ),
+        bind_cols(
+          level_change = tidy(coeftest(lin_regs_lst_resids[[i]], vcov = vcovPL), conf.int = TRUE)$estimate[2],
+          lc_se = tidy(coeftest(lin_regs_lst_resids[[i]], vcov = vcovPL), conf.int = TRUE)$`std.error`[2],
+          lc_conf_low = tidy(coeftest(lin_regs_lst_resids[[i]], vcov = vcovPL), conf.int = TRUE)$conf.low[2],
+          lc_conf_high = tidy(coeftest(lin_regs_lst_resids[[i]], vcov = vcovPL), conf.int = TRUE)$conf.high[2],
+          
+          slope_change = tidy(coeftest(lin_regs_lst_resids[[i]], vcov = vcovPL), conf.int = TRUE)$estimate[4],
+          sc_se = tidy(coeftest(lin_regs_lst_resids[[i]], vcov = vcovPL), conf.int = TRUE)$`std.error`[4],
+          sc_conf_low = tidy(coeftest(lin_regs_lst_resids[[i]], vcov = vcovPL), conf.int = TRUE)$conf.low[4],
+          sc_conf_high = tidy(coeftest(lin_regs_lst_resids[[i]], vcov = vcovPL), conf.int = TRUE)$conf.high[4],
+          
+          linear = T,
+          polynomial = F,
+          residualized = T
+        ),
+        bind_cols(
+          level_change = tidy(coeftest(poly_regs_lst_resids[[i]], vcov = vcovPL), conf.int = TRUE)$estimate[2],
+          lc_se = tidy(coeftest(poly_regs_lst_resids[[i]], vcov = vcovPL), conf.int = TRUE)$`std.error`[2],
+          lc_conf_low = tidy(coeftest(poly_regs_lst_resids[[i]], vcov = vcovPL), conf.int = TRUE)$conf.low[2],
+          lc_conf_high = tidy(coeftest(poly_regs_lst_resids[[i]], vcov = vcovPL), conf.int = TRUE)$conf.high[2],
+          
+          slope_change = tidy(coeftest(poly_regs_lst_resids[[i]], vcov = vcovPL), conf.int = TRUE)$estimate[5],
+          sc_se = tidy(coeftest(poly_regs_lst_resids[[i]], vcov = vcovPL), conf.int = TRUE)$`std.error`[5],
+          sc_conf_low = tidy(coeftest(poly_regs_lst_resids[[i]], vcov = vcovPL), conf.int = TRUE)$conf.low[5],
+          sc_conf_high = tidy(coeftest(poly_regs_lst_resids[[i]], vcov = vcovPL), conf.int = TRUE)$conf.high[5],
+          
+          linear = F,
+          polynomial = T,
+          residualized = T
+        )
+      ) %>% mutate(model = c(1:4))
+    
+    # plotting
+    coef_plot_lst[[i]] <- cowplot::plot_grid(
+      cowplot::ggdraw() + cowplot::draw_label("coefficients",
+                                              x = 0,
+                                              hjust = 0) +
+        theme(# add margin on the left of the drawing canvas,
+          # so title is aligned with left edge of first plot
+          plot.margin = margin(0, 0, 0, 7)),
+      ggplot(coef_lst[[i]], aes(y =
+                                  level_change, x = model)) +
+        geom_point() +
+        geom_pointrange(aes(ymin = lc_conf_low, ymax = lc_conf_high)) +
+        geom_hline(
+          yintercept = 0,
+          linetype = "dashed",
+          color = "darkgray",
+          size = 1.5
+        ) +
+        theme_bw() + theme(
+          axis.text.x = element_blank(),
+          axis.title.x = element_blank(),
+          panel.grid.major.x = element_blank(),
+          panel.grid.minor.x = element_blank(),
+          axis.ticks = element_blank()
+        ),
+      
+      ggplot(coef_lst[[i]], aes(y =
+                                  slope_change, x = model)) +
+        geom_point() +
+        geom_pointrange(aes(ymin = sc_conf_low, ymax = sc_conf_high)) +
+        geom_hline(
+          yintercept = 0,
+          linetype = "dashed",
+          color = "darkgray",
+          size = 1.5
+        ) +
+        theme_bw() + theme(
+          axis.text.x = element_blank(),
+          axis.title.x = element_blank(),
+          panel.grid.major.x = element_blank(),
+          panel.grid.minor.x = element_blank(),
+          axis.ticks = element_blank()
+        ),
+      
+      cowplot::ggdraw() + cowplot::draw_label("model specifications",
+                                              x = 0,
+                                              hjust = 0) +
+        theme(# add margin on the left of the drawing canvas,
+          # so title is aligned with left edge of first plot
+          plot.margin = margin(0, 0, 0, 7)),
+      
+      ggplot(coef_lst[[i]]) +
+        geom_point(
+          aes(
+            y = "residualized",
+            x = model,
+            color = residualized,
+            size = .25
+          )
+        ) +
+        geom_point(aes(
+          y = "polynomial",
+          x = model,
+          color = polynomial,
+          size = .25
+        )) +
+        geom_point(aes(
+          y = "linear",
+          x = model,
+          color = linear,
+          size = .25
+        )) +
+        theme_minimal() + scale_color_manual(values = c(
+          "TRUE" = "darkgray", "FALSE" = "white"
+        )) +
+        theme(
+          legend.position = "none",
+          axis.text.x = element_blank(),
+          axis.title.x = element_blank(),
+          axis.title.y = element_blank(),
+          panel.grid.minor.x = element_blank()
+        ),
+      ncol = 1,
+      align = "v",
+      axis = "lr",
+      rel_heights = c(.2, 2, 2, .2, 1)#,
+    )
+    
+    
+    
+  }
+  
+  bandwidth_lst[[bw]] <- coef_lst
+  bandwidth_plot_lst[[bw]] <- coef_plot_lst
+  
+}
+  
+# Plotting
+  
+plot1_bw <- cowplot::plot_grid(
+  cowplot::plot_grid(
+    plotlist = bandwidth_plot_lst[[1]], ncol = 3, align = "h"),
+  cowplot::plot_grid(
+    plotlist = bandwidth_plot_lst[[2]], ncol = 3, align = "h"),
+  cowplot::plot_grid(
+    plotlist = bandwidth_plot_lst[[3]], ncol = 3, align = "h"),
+  labels = c('60d', '90d', '120d'),
+  label_size = 18,
+  nrow = 3,
+  align = "v",
+  hjust = -0.25,
+  vjust = 1
+)
+
+plot1_bw
+ggsave(
+  filename = "period1_bw.pdf",
+  path = here("analysis/plots/bw"),
+  width = 57,
+  height = 35,
+  units = "cm"
+)

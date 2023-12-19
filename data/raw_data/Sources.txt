@@ -1,0 +1,7 @@
+KPI & CPI : SCB
+Arbetsloshet : SCB
+Polls: Five Institutes - Poll of Polls
+HH Consumption: SCB
+Google Search: google (multiTimeline.csv)
+Stockholm 30 Index: https://stooq.com/q/d/?s=^omxs (^omxs_d.csv)
+GHG: https://www.statistikdatabasen.scb.se/pxweb/sv/ssd/START__MI__MI0107/TotaltUtslappN/table/tableViewLayout1/ (GHG_0000018Q_20210415-091938.xlsx)
