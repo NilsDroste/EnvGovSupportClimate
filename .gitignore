@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 /application
 /literature
 /old
@@ -9,16 +8,4 @@
 /analysis/example_code
 /data/SOM
 .Rproj.user
-=======
-/application
-/literature
-/old
-/publication
-/text
-/analysis/pollofpolls
-/analysis/old
-/analysis/example_code
-/data/SOM
-.Rproj.user
->>>>>>> 972e08ac31bc84d037c526d404f79af5d910a244
 .Rhistory
